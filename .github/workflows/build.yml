@@ -90,7 +90,7 @@ jobs:
       - name: Setup Wild_KSU
         run: |
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" | bash -s wild-susfs
+          curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" | bash -s stable
 
       - name: Apply SUSFS patches
         if: matrix.susfs
