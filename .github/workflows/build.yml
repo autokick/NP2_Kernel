@@ -104,6 +104,11 @@ jobs:
           # Apply kernel patch
           patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10.patch
 
+          # Force susfs.o to compile unconditionally
+          # The patch adds obj-$(CONFIG_KSU_SUSFS) but Kconfig may not propagate the symbol
+          sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-y += susfs.o/' fs/Makefile
+          grep -q 'susfs\.o' fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
+
       - name: Configure kernel
         run: |
           cd kernel
