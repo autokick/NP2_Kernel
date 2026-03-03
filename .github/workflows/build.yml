@@ -59,9 +59,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: WKSU-SUSFS
+          - variant: KSU-Next-SUSFS
             susfs: true
-          - variant: WKSU
+          - variant: KSU-Next
             susfs: false
 
     steps:
@@ -208,6 +208,7 @@ jobs:
         with:
           name: kernel-NP2-${{ matrix.variant }}
           path: "*.zip"
+          retention-days: 30
 
       - name: Collect .rej files
         if: always()
