@@ -47,9 +47,14 @@ on:
         type: string
         default: 'vendor/waipio_GKI.config vendor/nothing/waipio_GKI.config'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +65,12 @@ jobs:
             susfs: false
 
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/share/swift /usr/local/graalvm /usr/local/share/powershell
+          sudo apt-get clean
+
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -148,12 +159,6 @@ jobs:
           # Remove -dirty suffix
           [ -f scripts/setlocalversion ] && sed -i 's/-dirty//g' scripts/setlocalversion || true
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/share/swift /usr/local/graalvm /usr/local/share/powershell
-          sudo apt-get clean
-
       - name: Enable swap space
         run: |
           # Remove existing swap file first
@@ -218,6 +223,7 @@ jobs:
         with:
           name: kernel-NP2-${{ matrix.variant }}
           path: "*.zip"
+          retention-days: 30
 
       - name: Collect .rej files
         if: always()
