@@ -11,14 +11,14 @@ on:
         description: 'Kernel source repo'
         required: false
         type: string
-        default: 'https://github.com/LineageOS/android_kernel_nothing_sm8475.git'
+        default: 'https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git'
       kernel_branch:
         description: 'Kernel branch'
         required: false
         type: string
-        default: 'lineage-23.2'
+        default: 'sm8475/b/mr'
       kernel_defconfig:
-        description: 'Defconfig (relative to arch/arm64/configs/)'
+        description: 'Base defconfig (relative to arch/arm64/configs/)'
         required: false
         type: string
         default: 'gki_defconfig'
@@ -26,18 +26,18 @@ on:
         description: 'Extra config fragments to merge (space-separated, relative to arch/arm64/configs/)'
         required: false
         type: string
-        default: 'vendor/waipio_GKI.config vendor/nothing/waipio_GKI.config vendor/debugfs.config'
+        default: 'vendor/waipio_GKI.config'
 
   workflow_call:
     inputs:
       kernel_repo:
         required: false
         type: string
-        default: 'https://github.com/LineageOS/android_kernel_nothing_sm8475.git'
+        default: 'https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git'
       kernel_branch:
         required: false
         type: string
-        default: 'lineage-23.2'
+        default: 'sm8475/b/mr'
       kernel_defconfig:
         required: false
         type: string
@@ -45,7 +45,7 @@ on:
       extra_configs:
         required: false
         type: string
-        default: 'vendor/waipio_GKI.config vendor/nothing/waipio_GKI.config vendor/debugfs.config'
+        default: 'vendor/waipio_GKI.config'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -78,8 +78,8 @@ jobs:
       - name: Clone sources
         run: |
           # Kernel
-          git clone --depth=1 -b "${{ inputs.kernel_branch || 'lineage-23.2' }}" \
-            "${{ inputs.kernel_repo || 'https://github.com/LineageOS/android_kernel_nothing_sm8475.git' }}" \
+          git clone --depth=1 -b "${{ inputs.kernel_branch || 'sm8475/b/mr' }}" \
+            "${{ inputs.kernel_repo || 'https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git' }}" \
             kernel
 
           # AnyKernel3
@@ -88,8 +88,9 @@ jobs:
 
           # SUSFS (only for SUSFS variant)
           if [ "${{ matrix.susfs }}" = "true" ]; then
-            git clone --depth=1 -b gki-android13-5.10 \
-              https://gitlab.com/simonpunk/susfs4ksu.git
+            # Try dev branch first (latest), fall back to stable if dev branch isn't available
+            git clone --depth=1 -b gki-android13-5.10-dev https://gitlab.com/simonpunk/susfs4ksu.git \
+              || git clone --depth=1 -b gki-android13-5.10 https://gitlab.com/simonpunk/susfs4ksu.git
           fi
 
       - name: Setup WKSU
@@ -106,12 +107,15 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
 
-          # Apply kernel patch
+          # Apply kernel patch (for android13-5.10)
+          if [ ! -f ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10.patch ]; then
+            echo "ERROR: SUSFS patch file not found!"
+            ls -la ../susfs4ksu/kernel_patches || true
+            exit 1
+          fi
           patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10.patch
 
           # Safety net: force susfs.o into the build regardless of Kconfig resolution.
-          # The Configure step uses scripts/config to guarantee CONFIG_KSU_SUSFS=y,
-          # but obj-y avoids a silent empty-object link failure if it gets dropped.
           sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-y += susfs.o/' fs/Makefile
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
 
@@ -126,39 +130,53 @@ jobs:
             O=out
         run: |
           cd kernel
-          DEFCONFIG="./arch/arm64/configs/${{ inputs.kernel_defconfig || 'gki_defconfig' }}"
 
-          # Merge extra config fragments into defconfig (if any)
+          BASE_DEF="${{ inputs.kernel_defconfig || 'gki_defconfig' }}"
+          BASE_PATH="./arch/arm64/configs/${BASE_DEF}"
+
+          if [ ! -f "$BASE_PATH" ]; then
+            echo "ERROR: Base defconfig not found: $BASE_PATH"
+            exit 1
+          fi
+
+          # Create our own defconfig so we don't modify upstream files
+          NP2_DEF="np2_defconfig"
+          NP2_PATH="./arch/arm64/configs/${NP2_DEF}"
+          cp "$BASE_PATH" "$NP2_PATH"
+
+          # Merge extra config fragments into NP2 defconfig (if any)
           EXTRA="${{ inputs.extra_configs }}"
           if [ -n "$EXTRA" ]; then
             for frag in $EXTRA; do
               FRAG_PATH="./arch/arm64/configs/$frag"
               if [ -f "$FRAG_PATH" ]; then
                 echo "Merging: $frag"
-                cat "$FRAG_PATH" >> "$DEFCONFIG"
+                cat "$FRAG_PATH" >> "$NP2_PATH"
+              else
+                echo "Skip (not found): $frag"
               fi
             done
           fi
 
-          # Seed KSU/SUSFS options into defconfig (scripts/config below is the real authority)
-          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          # Seed KSU/SUSFS options into NP2 defconfig (scripts/config below is the real authority)
+          echo "CONFIG_KSU=y" >> "$NP2_PATH"
           if [ "${{ matrix.susfs }}" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$NP2_PATH"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$NP2_PATH"
           else
-            echo "CONFIG_KSU_SUSFS=n" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS=n" >> "$NP2_PATH"
           fi
 
-          # Generate initial .config from defconfig
-          make $MAKE_ARGS "${{ inputs.kernel_defconfig || 'gki_defconfig' }}"
+          # Generate initial .config from our NP2 defconfig
+          make $MAKE_ARGS "$NP2_DEF"
 
           # Force-set configs via scripts/config so Kconfig cannot silently drop them
           KCFG="./scripts/config --file out/.config"
@@ -178,7 +196,7 @@ jobs:
             $KCFG -d KSU_SUSFS
           fi
 
-          # Resolve dependencies without dropping our forced configs
+          # Resolve dependencies
           make $MAKE_ARGS olddefconfig
 
           # Verify critical configs survived
@@ -190,10 +208,6 @@ jobs:
               exit 1
             fi
           fi
-          # Fail-safe: these MUST match stock or vendor modules won't load
-          if grep -q 'CONFIG_DEBUG_FS=y' out/.config; then
-            echo "WARNING: CONFIG_DEBUG_FS=y survived — vendor/debugfs.config was overridden!"
-          fi
 
           # Remove -dirty suffix
           [ -f scripts/setlocalversion ] && sed -i 's/-dirty//g' scripts/setlocalversion || true
@@ -204,11 +218,11 @@ jobs:
         with:
           name: config-NP2-${{ matrix.variant }}
           path: kernel/out/.config
+          include-hidden-files: true
           retention-days: 1
 
       - name: Enable swap space
         run: |
-          # Remove existing swap file first
           sudo swapoff /swapfile 2>/dev/null || true
           sudo rm -f /swapfile
           sudo fallocate -l 12G /swapfile
@@ -216,10 +230,9 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      - name: Build kernel
+      - name: Build kernel (no dtbs)
         run: |
           cd kernel
-          # Reduce parallel jobs to prevent memory exhaustion
           JOBS=$(( $(nproc) / 2 ))
           [ "$JOBS" -lt 1 ] && JOBS=1
 
@@ -230,21 +243,19 @@ jobs:
             LD=ld.lld HOSTLD=ld.lld \
             CC=clang CXX=clang++ \
             KCFLAGS="-Wno-error" \
-            O=out
+            O=out \
+            Image Image.gz modules
 
       - name: Package AnyKernel3
         run: |
-          # Verify build output exists
           if [ ! -f kernel/out/arch/arm64/boot/Image ]; then
             echo "ERROR: kernel Image not found — build failed"
             exit 1
           fi
 
-          # Copy kernel image
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/ 2>/dev/null || true
 
-          # Copy anykernel.sh from repo and set variant kernel string
           cp Scripts/anykernel.sh AnyKernel3/anykernel.sh
           if [ "${{ matrix.susfs }}" = "true" ]; then
             sed -i 's/kernel.string=.*/kernel.string=NP2 Kernel - WKSU + SUSFS/' AnyKernel3/anykernel.sh
@@ -252,7 +263,6 @@ jobs:
             sed -i 's/kernel.string=.*/kernel.string=NP2 Kernel - WKSU/' AnyKernel3/anykernel.sh
           fi
 
-          # Create zip
           cd AnyKernel3
           ZIP_NAME="${{ matrix.variant }}-NP2-Pong.zip"
           zip -r "../$ZIP_NAME" ./*
@@ -263,14 +273,6 @@ jobs:
           name: kernel-NP2-${{ matrix.variant }}
           path: "*.zip"
           retention-days: 30
-
-      - name: Upload .config for debugging
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-NP2-${{ matrix.variant }}
-          path: kernel/out/.config
-          retention-days: 1
 
       - name: Collect .rej files
         if: always()
