@@ -23,7 +23,7 @@ on:
         type: string
         default: "gki_defconfig"
       extra_configs:
-        description: "Extra config fragments to merge (space-separated, relative to arch/arm64/configs/)"
+        description: "Extra config fragments (space-separated, relative to arch/arm64/configs/)"
         required: false
         type: string
         default: "vendor/waipio_GKI.config"
@@ -73,7 +73,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev \
-            lz4 zip python3 clang llvm lld gcc-aarch64-linux-gnu
+            lz4 zip python3 clang llvm lld gcc-aarch64-linux-gnu perl
 
       - name: Clone sources
         run: |
@@ -86,9 +86,8 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           rm -rf AnyKernel3/.git
 
-          # SUSFS (only for SUSFS variant)
+          # SUSFS (only for SUSFS variant) - try latest(dev) first, fallback to stable
           if [ "${{ matrix.susfs }}" = "true" ]; then
-            # latest first, fallback
             git clone --depth=1 -b gki-android13-5.10-dev https://gitlab.com/simonpunk/susfs4ksu.git \
               || git clone --depth=1 -b gki-android13-5.10 https://gitlab.com/simonpunk/susfs4ksu.git
           fi
@@ -103,41 +102,59 @@ jobs:
         run: |
           cd kernel
 
-          # Copy SUSFS source files
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
 
-          # Pick patch file
           PATCH_FILE="$(ls -1 ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10*.patch 2>/dev/null | head -n1)"
           if [ -z "$PATCH_FILE" ]; then
             echo "ERROR: SUSFS patch file not found!"
             ls -la ../susfs4ksu/kernel_patches || true
             exit 1
           fi
+
           echo "Using SUSFS patch: $PATCH_FILE"
           patch -p1 < "$PATCH_FILE"
 
-          # Safety net: force susfs.o into the build regardless of Kconfig resolution
+          # Safety net: ensure susfs.o is built
           sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-y += susfs.o/' fs/Makefile
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
 
-      - name: Fix upstream compile blockers (NothingOSS)
+      - name: Fix NothingOSS compile blockers + strip local -Werror
         run: |
           cd kernel
+
+          # (A) Some vendor dirs force -Werror via Makefile/Kbuild. Strip it.
+          if [ -d drivers/nothing_stability ]; then
+            while IFS= read -r -d '' f; do
+              sed -i 's/-Werror//g' "$f"
+            done < <(find drivers/nothing_stability -type f \( -name 'Makefile' -o -name 'Kbuild' \) -print0)
+          fi
+
+          # (B) Fix known hard errors seen so far
 
           # 1) implicit-int (minidump_log.c)
           FILE1="drivers/soc/qcom/minidump_log.c"
           if [ -f "$FILE1" ] && grep -q 'static md_align_offset;' "$FILE1"; then
-            echo "[patch] minidump_log: static md_align_offset; -> static int md_align_offset;"
             sed -i 's/static md_align_offset;/static int md_align_offset;/' "$FILE1"
           fi
 
-          # 2) strict-prototypes (slot_status.c)
+          # 2) strict-prototypes in drivers/misc/slot_status.c
           FILE2="drivers/misc/slot_status.c"
           if [ -f "$FILE2" ] && grep -q 'static int slot_parse_dt()' "$FILE2"; then
-            echo "[patch] slot_status: slot_parse_dt() -> slot_parse_dt(void)"
             sed -i 's/static int slot_parse_dt()/static int slot_parse_dt(void)/' "$FILE2"
           fi
+
+          # 3) strict-prototypes in nothing_stability (auto-fix: "name() {" -> "name(void) {")
+          #    제한 범위: drivers/nothing_stability/*.c 만
+          if [ -d drivers/nothing_stability ]; then
+            while IFS= read -r -d '' cfile; do
+              perl -0777 -pi -e 's/(\bstatic\s+[^;{}()]*\b[A-Za-z_][A-Za-z0-9_]*\s*)\(\s*\)\s*\{/$1(void) {/g' "$cfile"
+            done < <(find drivers/nothing_stability -type f -name '*.c' -print0)
+          fi
+
+          # Show remaining -Werror in those dirs (should be empty)
+          echo "--- Remaining -Werror hits (should be none in nothing_stability) ---"
+          (grep -RIn -- '-Werror' drivers/nothing_stability 2>/dev/null || true)
 
       - name: Configure kernel
         env:
@@ -159,12 +176,11 @@ jobs:
             exit 1
           fi
 
-          # Create our own defconfig so we don't modify upstream files
+          # Create private defconfig (don't mutate upstream)
           NP2_DEF="np2_defconfig"
           NP2_PATH="./arch/arm64/configs/${NP2_DEF}"
           cp "$BASE_PATH" "$NP2_PATH"
 
-          # Merge extra config fragments into NP2 defconfig (if any)
           EXTRA="${{ inputs.extra_configs }}"
           if [ -n "$EXTRA" ]; then
             for frag in $EXTRA; do
@@ -178,7 +194,7 @@ jobs:
             done
           fi
 
-          # Seed KSU/SUSFS options
+          # Seed KSU/SUSFS
           echo "CONFIG_KSU=y" >> "$NP2_PATH"
           if [ "${{ matrix.susfs }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS=y" >> "$NP2_PATH"
@@ -195,7 +211,6 @@ jobs:
             echo "CONFIG_KSU_SUSFS=n" >> "$NP2_PATH"
           fi
 
-          # Generate initial .config from our NP2 defconfig
           make $MAKE_ARGS "$NP2_DEF"
 
           # Force-set configs via scripts/config
@@ -231,6 +246,7 @@ jobs:
           name: config-NP2-${{ matrix.variant }}
           path: kernel/out/.config
           include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Enable swap space
@@ -242,12 +258,13 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      - name: Build kernel (no dtbs, no Werror)
+      - name: Build kernel (Image only, no dtbs, no Werror)
         run: |
           cd kernel
           JOBS=$(( $(nproc) / 2 ))
           [ "$JOBS" -lt 1 ] && JOBS=1
 
+          # WERROR=0 handles global, KCFLAGS handles per-dir injected -Werror and strict-prototypes.
           make -j$JOBS \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -256,6 +273,7 @@ jobs:
             CC=clang CXX=clang++ \
             O=out \
             WERROR=0 \
+            KCFLAGS="-Wno-error -Wno-error=strict-prototypes -Wno-strict-prototypes" \
             Image Image.gz modules
 
       - name: Export kernel image (.img)
@@ -264,6 +282,8 @@ jobs:
           mkdir -p out_artifacts
           if [ -f kernel/out/arch/arm64/boot/Image ]; then
             cp kernel/out/arch/arm64/boot/Image out_artifacts/kernel.img
+          else
+            echo "kernel Image not found" > out_artifacts/BUILD_FAILED.txt
           fi
           if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
             cp kernel/out/arch/arm64/boot/Image.gz out_artifacts/kernel.img.gz
@@ -275,6 +295,7 @@ jobs:
         with:
           name: kernel-img-${{ matrix.variant }}
           path: out_artifacts/*
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Package AnyKernel3
@@ -299,10 +320,12 @@ jobs:
           zip -r "../$ZIP_NAME" ./*
 
       - name: Upload AnyKernel zip artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-NP2-${{ matrix.variant }}
           path: "*.zip"
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Collect .rej files
@@ -326,3 +349,4 @@ jobs:
         with:
           name: rej-NP2-${{ matrix.variant }}
           path: rej/
+          if-no-files-found: warn
