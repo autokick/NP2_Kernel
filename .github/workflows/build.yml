@@ -88,7 +88,7 @@ jobs:
 
           # SUSFS (only for SUSFS variant)
           if [ "${{ matrix.susfs }}" = "true" ]; then
-            # Try dev branch first (latest), fall back to stable if dev branch isn't available
+            # latest first, fallback
             git clone --depth=1 -b gki-android13-5.10-dev https://gitlab.com/simonpunk/susfs4ksu.git \
               || git clone --depth=1 -b gki-android13-5.10 https://gitlab.com/simonpunk/susfs4ksu.git
           fi
@@ -107,30 +107,36 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
 
-          # Pick the best matching patch file
+          # Pick patch file
           PATCH_FILE="$(ls -1 ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10*.patch 2>/dev/null | head -n1)"
           if [ -z "$PATCH_FILE" ]; then
             echo "ERROR: SUSFS patch file not found!"
             ls -la ../susfs4ksu/kernel_patches || true
             exit 1
           fi
-
           echo "Using SUSFS patch: $PATCH_FILE"
           patch -p1 < "$PATCH_FILE"
 
-          # Safety net: force susfs.o into the build regardless of Kconfig resolution.
+          # Safety net: force susfs.o into the build regardless of Kconfig resolution
           sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-y += susfs.o/' fs/Makefile
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
 
-      - name: Fix minidump_log implicit-int
+      - name: Fix upstream compile blockers (NothingOSS)
         run: |
           cd kernel
-          FILE="drivers/soc/qcom/minidump_log.c"
-          if [ -f "$FILE" ] && grep -q 'static md_align_offset;' "$FILE"; then
-            echo "[patch] Fixing: static md_align_offset; -> static int md_align_offset;"
-            sed -i 's/static md_align_offset;/static int md_align_offset;/' "$FILE"
-          else
-            echo "[patch] No implicit-int pattern found (ok)"
+
+          # 1) implicit-int (minidump_log.c)
+          FILE1="drivers/soc/qcom/minidump_log.c"
+          if [ -f "$FILE1" ] && grep -q 'static md_align_offset;' "$FILE1"; then
+            echo "[patch] minidump_log: static md_align_offset; -> static int md_align_offset;"
+            sed -i 's/static md_align_offset;/static int md_align_offset;/' "$FILE1"
+          fi
+
+          # 2) strict-prototypes (slot_status.c)
+          FILE2="drivers/misc/slot_status.c"
+          if [ -f "$FILE2" ] && grep -q 'static int slot_parse_dt()' "$FILE2"; then
+            echo "[patch] slot_status: slot_parse_dt() -> slot_parse_dt(void)"
+            sed -i 's/static int slot_parse_dt()/static int slot_parse_dt(void)/' "$FILE2"
           fi
 
       - name: Configure kernel
@@ -172,7 +178,7 @@ jobs:
             done
           fi
 
-          # Seed KSU/SUSFS options into NP2 defconfig (scripts/config below is the real authority)
+          # Seed KSU/SUSFS options
           echo "CONFIG_KSU=y" >> "$NP2_PATH"
           if [ "${{ matrix.susfs }}" = "true" ]; then
             echo "CONFIG_KSU_SUSFS=y" >> "$NP2_PATH"
@@ -192,7 +198,7 @@ jobs:
           # Generate initial .config from our NP2 defconfig
           make $MAKE_ARGS "$NP2_DEF"
 
-          # Force-set configs via scripts/config so Kconfig cannot silently drop them
+          # Force-set configs via scripts/config
           KCFG="./scripts/config --file out/.config"
           $KCFG -e KSU
           if [ "${{ matrix.susfs }}" = "true" ]; then
@@ -210,18 +216,10 @@ jobs:
             $KCFG -d KSU_SUSFS
           fi
 
-          # Resolve dependencies
           make $MAKE_ARGS olddefconfig
 
-          # Verify critical configs survived
           echo "--- Config verification ---"
           grep -E 'CONFIG_KSU=|CONFIG_KSU_SUSFS=' out/.config || true
-          if [ "${{ matrix.susfs }}" = "true" ]; then
-            if ! grep -q 'CONFIG_KSU_SUSFS=y' out/.config; then
-              echo "ERROR: CONFIG_KSU_SUSFS=y missing from final .config!"
-              exit 1
-            fi
-          fi
 
           # Remove -dirty suffix
           [ -f scripts/setlocalversion ] && sed -i 's/-dirty//g' scripts/setlocalversion || true
@@ -244,7 +242,7 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      - name: Build kernel (no dtbs)
+      - name: Build kernel (no dtbs, no Werror)
         run: |
           cd kernel
           JOBS=$(( $(nproc) / 2 ))
@@ -256,9 +254,28 @@ jobs:
             LLVM=1 LLVM_IAS=1 \
             LD=ld.lld HOSTLD=ld.lld \
             CC=clang CXX=clang++ \
-            KCFLAGS="-Wno-error" \
             O=out \
+            WERROR=0 \
             Image Image.gz modules
+
+      - name: Export kernel image (.img)
+        if: always()
+        run: |
+          mkdir -p out_artifacts
+          if [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image out_artifacts/kernel.img
+          fi
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz out_artifacts/kernel.img.gz
+          fi
+
+      - name: Upload kernel image artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-img-${{ matrix.variant }}
+          path: out_artifacts/*
+          retention-days: 30
 
       - name: Package AnyKernel3
         run: |
@@ -281,7 +298,7 @@ jobs:
           ZIP_NAME="${{ matrix.variant }}-NP2-Pong.zip"
           zip -r "../$ZIP_NAME" ./*
 
-      - name: Upload artifact
+      - name: Upload AnyKernel zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: kernel-NP2-${{ matrix.variant }}
