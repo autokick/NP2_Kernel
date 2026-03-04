@@ -8,44 +8,44 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'Kernel source repo'
+        description: "Kernel source repo"
         required: false
         type: string
-        default: 'https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git'
+        default: "https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git"
       kernel_branch:
-        description: 'Kernel branch'
+        description: "Kernel branch"
         required: false
         type: string
-        default: 'sm8475/b/mr'
+        default: "sm8475/b/mr"
       kernel_defconfig:
-        description: 'Base defconfig (relative to arch/arm64/configs/)'
+        description: "Base defconfig (relative to arch/arm64/configs/)"
         required: false
         type: string
-        default: 'gki_defconfig'
+        default: "gki_defconfig"
       extra_configs:
-        description: 'Extra config fragments to merge (space-separated, relative to arch/arm64/configs/)'
+        description: "Extra config fragments to merge (space-separated, relative to arch/arm64/configs/)"
         required: false
         type: string
-        default: 'vendor/waipio_GKI.config'
+        default: "vendor/waipio_GKI.config"
 
   workflow_call:
     inputs:
       kernel_repo:
         required: false
         type: string
-        default: 'https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git'
+        default: "https://github.com/NothingOSS/android_kernel_msm-5.10_nothing_sm8475.git"
       kernel_branch:
         required: false
         type: string
-        default: 'sm8475/b/mr'
+        default: "sm8475/b/mr"
       kernel_defconfig:
         required: false
         type: string
-        default: 'gki_defconfig'
+        default: "gki_defconfig"
       extra_configs:
         required: false
         type: string
-        default: 'vendor/waipio_GKI.config'
+        default: "vendor/waipio_GKI.config"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -107,17 +107,31 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
 
-          # Apply kernel patch (for android13-5.10)
-          if [ ! -f ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10.patch ]; then
+          # Pick the best matching patch file
+          PATCH_FILE="$(ls -1 ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10*.patch 2>/dev/null | head -n1)"
+          if [ -z "$PATCH_FILE" ]; then
             echo "ERROR: SUSFS patch file not found!"
             ls -la ../susfs4ksu/kernel_patches || true
             exit 1
           fi
-          patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.10.patch
+
+          echo "Using SUSFS patch: $PATCH_FILE"
+          patch -p1 < "$PATCH_FILE"
 
           # Safety net: force susfs.o into the build regardless of Kconfig resolution.
           sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-y += susfs.o/' fs/Makefile
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
+
+      - name: Fix minidump_log implicit-int
+        run: |
+          cd kernel
+          FILE="drivers/soc/qcom/minidump_log.c"
+          if [ -f "$FILE" ] && grep -q 'static md_align_offset;' "$FILE"; then
+            echo "[patch] Fixing: static md_align_offset; -> static int md_align_offset;"
+            sed -i 's/static md_align_offset;/static int md_align_offset;/' "$FILE"
+          else
+            echo "[patch] No implicit-int pattern found (ok)"
+          fi
 
       - name: Configure kernel
         env:
@@ -219,7 +233,7 @@ jobs:
           name: config-NP2-${{ matrix.variant }}
           path: kernel/out/.config
           include-hidden-files: true
-          retention-days: 1
+          retention-days: 7
 
       - name: Enable swap space
         run: |
